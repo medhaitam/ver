@@ -6,7 +6,9 @@ function App() {
     <div>
       <h1 style={{ textAlign: 'center' }}>Solar Monitoring App</h1>
       <MqttDashboard />
+      
     </div>
+    
   );
 }
 

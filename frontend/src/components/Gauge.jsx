@@ -1,8 +1,7 @@
-// src/components/Gauge.jsx
 import React from 'react';
 import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts';
 
-const Gauge = ({ value, min, max, unit, colors = ['#4361ee', '#e9ecef'] }) => {
+const Gauge = ({ value, min, max, unit, colors = ['#0088FE', '#eee'] }) => {
   const percent = Math.min(Math.max((value - min) / (max - min), 0), 1);
   const data = [
     { name: 'filled', value: percent * 100 },
@@ -10,8 +9,8 @@ const Gauge = ({ value, min, max, unit, colors = ['#4361ee', '#e9ecef'] }) => {
   ];
   
   return (
-    <div>
-      <div style={{ height: '150px' }}>
+    <div className="gauge-container">
+      <div style={{ width: '100%', height: 100 }}>
         <ResponsiveContainer width="100%" height="100%">
           <PieChart>
             <Pie
@@ -26,23 +25,15 @@ const Gauge = ({ value, min, max, unit, colors = ['#4361ee', '#e9ecef'] }) => {
               dataKey="value"
             >
               {data.map((entry, index) => (
-                <Cell 
-                  key={`cell-${index}`} 
-                  fill={colors[index % colors.length]} 
-                />
+                <Cell key={`cell-${index}`} fill={colors[index % colors.length]} />
               ))}
             </Pie>
           </PieChart>
         </ResponsiveContainer>
       </div>
-      <p style={{ 
-        textAlign: 'center', 
-        fontSize: '2rem',
-        fontWeight: '700',
-        margin: '0.5rem 0'
-      }}>
-        {value} <span style={{ fontSize: '1rem' }}>{unit}</span>
-      </p>
+      <div className="gauge-value">
+        {value} {unit}
+      </div>
     </div>
   );
 };
