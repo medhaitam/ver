@@ -1,118 +1,94 @@
-#!/usr/bin/env python3
-from flask import Flask, jsonify
-from flask_socketio import SocketIO
-from mqtt_handler import MQTTHandler
-from flask import request
-from flask_socketio import emit
-import threading
-import logging
+# app.py
+
+from flask import Flask, jsonify, request
+from flask_socketio import SocketIO, emit
+from flask_cors import CORS
 from datetime import datetime
-import signal
-import sys
+from threading import Lock
+import logging
 
-# Configuration de l'application
+from mqtt_handler import MQTTHandler
+
+# Initialize Flask
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key-here'
-socketio = SocketIO(app, 
-                   cors_allowed_origins="*",
-                   async_mode='threading',
-                   logger=True,
-                   engineio_logger=True)
+CORS(app)
 
-# Configuration MQTT
-MQTT_BROKER = "localhost"
-MQTT_PORT = 1883
-MQTT_TOPICS = [
-    "solar/data",          # Données principales
-    "solar/irradiation",   # Mesures d'irradiation
-    "solar/alerts",        # Alertes système
-    "solar/status"         # Status des équipements
-]
+# SocketIO configuration
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
-# Initialisation du handler MQTT
-mqtt_handler = MQTTHandler(socketio)
+# Logging config
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+)
+logger = logging.getLogger("SolarMonitor")
 
-def create_app():
-    """Factory pour la création de l'application"""
-    configure_logging()
-    register_blueprints()
-    return app
+# Thread-safe data store
+class DataStore:
+    def __init__(self):
+        self.lock = Lock()
+        self.data = {
+            'solar': None,
+            'irradiation': None,
+            'status': None,
+            'alerts': [],
+            'last_update': None
+        }
 
-def configure_logging():
-    """Configuration du système de logs"""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler('solar_backend.log')
-        ]
-    )
+    def update(self, key, value):
+        with self.lock:
+            if key == 'alerts':
+                self.data['alerts'].append(value)
+            else:
+                self.data[key] = value
+            self.data['last_update'] = datetime.utcnow().isoformat()
 
-def register_blueprints():
-    """Enregistrement des blueprints (pour extensions futures)"""
-    pass
+    def get_all(self):
+        with self.lock:
+            return self.data.copy()
 
+# Create instances
+data_store = DataStore()
+mqtt_handler = MQTTHandler(data_store, socketio)
+mqtt_handler.connect()
+
+# SocketIO events
 @socketio.on('connect')
-def handle_connect():
-    """Gestion des connexions Socket.IO"""
-    logging.info(f"Client connected: {request.sid}")
-    emit('connection_ack', {'status': 'connected', 'time': datetime.now().isoformat()})
+def on_connect():
+    logger.info(f"🔌 Client connected: {request.sid}")
+    emit('connection_ack', {'status': 'connected', 'time': datetime.utcnow().isoformat()})
+    emit('initial_data', data_store.get_all())
 
 @socketio.on('disconnect')
-def handle_disconnect():
-    """Gestion des déconnexions Socket.IO"""
-    logging.info(f"Client disconnected: {request.sid}")
+def on_disconnect():
+    logger.info(f"❌ Client disconnected: {request.sid}")
 
-@app.route('/api/health')
+# REST API
+@app.route('/api/data', methods=['GET'])
+def get_data():
+    return jsonify(data_store.get_all())
+
+@app.route('/api/health', methods=['GET'])
 def health_check():
-    """Endpoint de santé de l'application"""
     return jsonify({
         'status': 'healthy',
-        'timestamp': datetime.now().isoformat(),
         'services': {
             'flask': 'running',
             'socketio': 'running',
             'mqtt': 'connected' if mqtt_handler.connected else 'disconnected'
         },
-        'version': '1.0.0'
+        'timestamp': datetime.utcnow().isoformat()
     })
 
-@app.route('/api/metrics')
-def get_metrics():
-    """Endpoint pour récupérer les dernières métriques"""
-    return jsonify(mqtt_handler.get_latest_metrics())
+@app.route('/api/command', methods=['POST'])
+def send_command():
+    if not request.is_json:
+        return jsonify({'error': 'Invalid JSON'}), 400
 
-def start_mqtt_client():
-    """Démarrage du client MQTT dans un thread séparé"""
-    try:
-        mqtt_handler.connect(broker=MQTT_BROKER, port=MQTT_PORT)
-        for topic in MQTT_TOPICS:
-            mqtt_handler.subscribe(topic)
-    except Exception as e:
-        logging.error(f"Failed to start MQTT client: {str(e)}")
-        sys.exit(1)
-
-def shutdown_handler(signum, frame):
-    """Gestion propre de l'arrêt de l'application"""
-    logging.info("Shutting down server...")
-    mqtt_handler.disconnect()
-    socketio.stop()
-    sys.exit(0)
+    command = request.get_json()
+    if mqtt_handler.publish('solar_medhaitam/commands', command):
+        return jsonify({'status': 'command_sent'})
+    return jsonify({'error': 'MQTT not connected'}), 503
 
 if __name__ == '__main__':
-    # Gestion des signaux d'arrêt
-    signal.signal(signal.SIGINT, shutdown_handler)
-    signal.signal(signal.SIGTERM, shutdown_handler)
-
-    # Démarrage des services
-    mqtt_thread = threading.Thread(target=start_mqtt_client, daemon=True)
-    mqtt_thread.start()
-
-    # Démarrer le serveur Socket.IO
-    socketio.run(app, 
-                host='0.0.0.0', 
-                port=5000, 
-                debug=False, 
-                use_reloader=False,
-                allow_unsafe_werkzeug=True)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)

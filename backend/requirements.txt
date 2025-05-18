@@ -4,3 +4,5 @@ paho-mqtt==1.6.1
 python-dotenv==1.0.0
 gunicorn==20.1.0
 eventlet==0.33.3
+flask-cors
+

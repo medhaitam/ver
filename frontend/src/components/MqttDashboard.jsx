@@ -30,10 +30,11 @@ import {
 import { Sun, Droplets } from 'lucide-react';
 
 // Configuration de la connexion Socket.IO
-const socket = io('http://localhost:5000', {
+const socket = io("http://localhost:5000", {
   reconnectionAttempts: 5,
   reconnectionDelay: 1000,
-  timeout: 20000
+  timeout: 20000,
+  path: "/socket.io"
 });
 
 const MqttDashboard = () => {

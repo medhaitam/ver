@@ -1,134 +1,121 @@
-import paho.mqtt.client as mqtt
-from flask_socketio import SocketIO
+# mqtt_handler.py
+
+import os
 import json
+import time
 import logging
 from datetime import datetime
+from threading import Thread
+import paho.mqtt.client as mqtt
+from dotenv import load_dotenv
 
-# Configuration du logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("MQTT Handler")
+load_dotenv()
+
+MQTT_BROKER = os.getenv('MQTT_BROKER', 'broker.hivemq.com')
+MQTT_PORT = int(os.getenv('MQTT_PORT', 1883))
+MQTT_TOPICS = {
+    'data': 'solar_medhaitam/data',
+    'irradiation': 'solar_medhaitam/irradiation',
+    'status': 'solar_medhaitam/status',
+    'alerts': 'solar_medhaitam/alerts',
+    'commands': 'solar_medhaitam/commands'
+}
+
+logger = logging.getLogger("SolarMonitor")
 
 class MQTTHandler:
-    def __init__(self, socketio: SocketIO):
-        self.socketio = socketio
+    def __init__(self, data_store, socketio):
         self.client = mqtt.Client()
+        self.data_store = data_store
+        self.socketio = socketio
         self.connected = False
-        self.latest_metrics = {}
 
-        # Configuration MQTT
-        self.client.on_connect = self._on_connect
-        self.client.on_message = self._on_message
-        self.client.on_disconnect = self._on_disconnect
+        self.client.on_connect = self.on_connect
+        self.client.on_message = self.on_message
+        self.client.on_disconnect = self.on_disconnect
 
-        # Topics configuration
-        self.topics = {
-            "solar/data": self._handle_solar_data,
-            "solar/irradiation": self._handle_irradiation,
-            "solar/status": self._handle_status,
-            "solar/alerts": self._handle_alerts
-        }
-
-    def connect(self, broker="localhost", port=1883, keepalive=60):
+    def connect(self):
         try:
-            self.client.connect(broker, port, keepalive)
-            self.client.loop_start()
-            logger.info(f"Connecting to MQTT broker at {broker}:{port}")
+            logger.info(f"Connecting to MQTT Broker: {MQTT_BROKER}:{MQTT_PORT}")
+            self.client.connect(MQTT_BROKER, MQTT_PORT, 60)
+            Thread(target=self.client.loop_forever, daemon=True).start()
         except Exception as e:
-            logger.error(f"Connection failed: {str(e)}")
+            logger.error(f"MQTT connection failed: {str(e)}")
+            time.sleep(5)
+            self.connect()
 
-    def _on_connect(self, client, userdata, flags, rc):
-        self.connected = True
-        logger.info("✅ MQTT Connected")
-        for topic in self.topics.keys():
-            client.subscribe(topic)
-            logger.info(f"📡 Subscribed to topic: {topic}")
+    def on_connect(self, client, userdata, flags, rc):
+        if rc == 0:
+            self.connected = True
+            logger.info("✅ MQTT connected")
+            for topic in MQTT_TOPICS.values():
+                client.subscribe(topic)
+                logger.info(f"📡 Subscribed to: {topic}")
+        else:
+            logger.error(f"❌ MQTT connection failed with code {rc}")
 
-    def _on_message(self, client, userdata, msg):
+    def on_message(self, client, userdata, msg):
         try:
-            handler = self.topics.get(msg.topic)
-            if handler:
-                payload = json.loads(msg.payload.decode())
-                handler(payload)
-            else:
-                logger.warning(f"No handler for topic: {msg.topic}")
+            payload = json.loads(msg.payload.decode())
+            topic = msg.topic
+
+            logger.debug(f"📥 MQTT [{topic}]: {payload}")
+            print(f"📨 [DEBUG] {msg.topic} => {payload}")  # 👈 AJOUTE ÇA
+            if topic == MQTT_TOPICS['data']:
+                enriched = {
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'source': 'cpp_publisher',
+                    'panelRefVoltage': payload.get("panelRefVoltage"),
+                    'panelRefCurrent': payload.get("panelRefCurrent"),
+                    'panelRefPower': payload.get("panelRefPower"),
+                    'panelRefEfficiency': payload.get("panelRefEfficiency"),
+                    'panelRefTemp': payload.get("panelRefTemp") or payload.get("panleRefTemp"),  # typo fallback
+                    'irradiation': payload.get("irradiation"),
+                    'system_status': {
+                        'frequency_ref': payload.get("frequency_ref"),
+                        'output_freq': payload.get("output_freq"),
+                        'output_power': payload.get("output_power"),
+                        'dc_bus_voltage': payload.get("dc_bus_voltage")
+                    }
+                
+                
+                }
+                print(f"📨 [DEBUG] {msg.topic} => {payload}")
+                self.data_store.update('solar', enriched)
+                self.socketio.emit('solar_data', enriched)
+
+            elif topic == MQTT_TOPICS['irradiation']:
+                self.data_store.update('irradiation', payload)
+                self.socketio.emit('irradiation_update', payload)
+                print(f"📨 [DEBUG] {msg.topic} => {payload}")
+            elif topic == MQTT_TOPICS['status']:
+                self.data_store.update('status', payload)
+                self.socketio.emit('system_status', payload)
+                print(f"📨 [DEBUG] {msg.topic} => {payload}")
+            elif topic == MQTT_TOPICS['alerts']:
+                self.data_store.update('alerts', payload)
+                self.socketio.emit('system_alert', payload)
+                logger.warning(f"⚠️ ALERT: {payload}")
+                print(f"📨 [DEBUG] {msg.topic} => {payload}")
         except json.JSONDecodeError:
-            logger.warning(f"⚠️ Invalid JSON received on topic {msg.topic}")
+            logger.error(f"❌ Invalid JSON on topic {msg.topic}")
         except Exception as e:
-            logger.error(f"❌ Error processing message on {msg.topic}: {str(e)}")
+            logger.error(f"❌ Error processing message: {str(e)}", exc_info=True)
 
-    def _on_disconnect(self, client, userdata, rc):
+    def on_disconnect(self, client, userdata, rc):
         self.connected = False
-        logger.warning(f"🔌 MQTT Disconnected (rc: {rc})")
-
-    def _handle_solar_data(self, data):
-        """Process solar panel metrics"""
-        processed = {
-            "panelRefVoltage": data.get("panelRefVoltage"),
-            "panelRefCurrent": data.get("panelRefCurrent"),
-            "panelRefPower": data.get("panelRefPower"),
-            "panleRefTemp": data.get("panleRefTemp"),
-            "panelRefEfficiency": data.get("panelRefEfficiency"),
-            "irradiation": data.get("irradiation"),
-            "timestamp": data.get("timestamp"),
-            "source": data.get("source"),
-            "frequency_ref": data.get("frequency_ref"),
-            "output_freq": data.get("output_freq"),
-            "output_power": data.get("output_power"),
-            "dc_bus_voltage": data.get("dc_bus_voltage"),
-            "module_temp": data.get("module_temp"),
-            "dc_current": data.get("dc_current"),
-            "dc_power": data.get("dc_power"),
-            "dc_efficiency": data.get("dc_efficiency"),
-            "flow_speed": data.get("flow_speed"),
-            "voc_voltage": data.get("voc_voltage"),
-            "daily_flow": data.get("daily_flow"),
-            "cumulative_flow_low": data.get("cumulative_flow_low"),
-            "cumulative_flow_high": data.get("cumulative_flow_high"),
-            "daily_gen_power": data.get("daily_gen_power"),
-            "total_power_low": data.get("total_power_low"),
-            "total_power_high": data.get("total_power_high"),
-
-        }
-        self.latest_metrics['solar_data'] = processed
-        self.socketio.emit('solar_update', processed)
-        logger.info(f"📤 Solar data: {processed}")
-
-    def _handle_irradiation(self, data):
-        """Process irradiation data"""
-        processed = {
-            'irradiation': float(data.get('value', 0)),
-            'unit': 'W/m²',
-            'timestamp': datetime.now().isoformat()
-        }
-        self.latest_metrics['irradiation'] = processed
-        self.socketio.emit('irradiation_update', processed)
-        logger.info(f"☀️ Irradiation: {processed}")
-
-    def _handle_status(self, data):
-        """Process system status"""
-        data['timestamp'] = datetime.now().isoformat()
-        self.latest_metrics['status'] = data
-        self.socketio.emit('system_status', data)
-        logger.info(f"🔄 Status: {data}")
-
-    def _handle_alerts(self, data):
-        """Process system alerts"""
-        data['timestamp'] = datetime.now().isoformat()
-        self.latest_metrics['alert'] = data
-        self.socketio.emit('system_alert', data)
-        logger.warning(f"🚨 ALERT: {data}")
+        if rc != 0:
+            logger.warning("⚠️ Unexpected disconnection. Reconnecting...")
+            time.sleep(5)
+            self.connect()
 
     def publish(self, topic, payload):
         if self.connected:
-            self.client.publish(topic, json.dumps(payload))
-            return True
+            try:
+                logger.info(f"📤 Publishing to {topic}: {payload}")
+                self.client.publish(topic, json.dumps(payload))
+                return True
+            except Exception as e:
+                logger.error(f"❌ Publish error: {str(e)}")
         return False
-
-    def get_latest_metrics(self):
-        """Return latest metrics for API access"""
-        return self.latest_metrics
-
-    def disconnect(self):
-        self.client.loop_stop()
-        self.client.disconnect()
-        logger.info("🛑 MQTT Disconnected gracefully")
+    
